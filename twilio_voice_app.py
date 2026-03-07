@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Clav Voice API - Twilio Backend
-Handles incoming calls, transcribes audio, responds with voice
-Deploy to Railway, Heroku, or similar
+Clav Voice API - Twilio Backend (FIXED VERSION)
+Properly handles audio transcription using Whisper
 """
 
 from flask import Flask, request, Response
@@ -11,6 +10,9 @@ import requests
 import json
 from datetime import datetime
 from dotenv import load_dotenv
+import subprocess
+import tempfile
+from base64 import b64encode
 
 # Load environment variables
 load_dotenv()
@@ -20,23 +22,68 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 
-# Validate credentials
-if not TWILIO_ACCOUNT_SID:
-    print("ERROR: TWILIO_ACCOUNT_SID not set in environment variables")
-if not TWILIO_AUTH_TOKEN:
-    print("ERROR: TWILIO_AUTH_TOKEN not set in environment variables")
+# Twilio Auth
+TWILIO_AUTH = (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-# Initialize Flask app
 app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 
 # Conversation memory
 conversation_history = {}
 
-def get_response(user_input, call_sid):
-    """Generate a contextual response based on user input"""
+def download_and_transcribe_audio(recording_url):
+    """Download Twilio recording and transcribe using Whisper"""
+    try:
+        # Download audio file with Twilio auth
+        response = requests.get(recording_url + ".wav", auth=TWILIO_AUTH, timeout=30)
+        
+        if response.status_code != 200:
+            print(f"Failed to download audio: {response.status_code}")
+            return None
+        
+        # Write to temp file
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp.write(response.content)
+            tmp_path = tmp.name
+        
+        print(f"Downloaded audio to {tmp_path}, size: {len(response.content)} bytes")
+        
+        # Transcribe using Whisper
+        try:
+            result = subprocess.run(
+                ["whisper", tmp_path, "--model", "tiny", "--language", "en", "--output_format", "json", "-o", "/tmp/"],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            json_file = tmp_path.replace('.wav', '.json')
+            if os.path.exists(json_file):
+                with open(json_file, 'r') as f:
+                    data = json.load(f)
+                    transcription = data.get('text', '').strip()
+                os.remove(json_file)
+                print(f"Transcribed: {transcription}")
+                return transcription if transcription else None
+            else:
+                print(f"Transcription file not found: {json_file}")
+                print(f"Whisper output: {result.stderr}")
+                return None
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
     
-    # Initialize conversation if new
+    except Exception as e:
+        print(f"Error downloading/transcribing audio: {e}")
+        return None
+
+def get_response(user_text, call_sid):
+    """Generate response based on user input"""
+    
+    if not user_text or user_text.strip() == "":
+        return "I didn't catch that. Can you speak up and try again?"
+    
+    # Initialize conversation
     if call_sid not in conversation_history:
         conversation_history[call_sid] = {
             "messages": [],
@@ -44,57 +91,39 @@ def get_response(user_input, call_sid):
             "count": 0
         }
     
-    # Increment message count
     conversation_history[call_sid]["count"] += 1
-    msg_count = conversation_history[call_sid]["count"]
-    
-    # Store user message
     conversation_history[call_sid]["messages"].append({
         "role": "user",
-        "text": user_input,
-        "time": datetime.now().isoformat()
+        "text": user_text
     })
     
-    user_lower = user_input.lower().strip()
+    user_lower = user_text.lower().strip()
+    count = conversation_history[call_sid]["count"]
     
-    # Response logic - first message
-    if msg_count == 1:
+    # First message responses
+    if count == 1:
         if any(word in user_lower for word in ["hi", "hello", "hey"]):
-            response = "Hey Henry! Good to hear from you. What's on your mind today?"
-        elif any(word in user_lower for word in ["contrarian", "track record", "backtest"]):
-            response = "Want to talk about contrarian8888's performance? I've got the data."
-        elif any(word in user_lower for word in ["morgan stanley", "networking", "banking"]):
-            response = "Let's work on your Morgan Stanley strategy. What do you want to focus on?"
+            return "Hey Henry! What's up?"
+        elif any(word in user_lower for word in ["contrarian", "track record"]):
+            return "Want to analyze contrarian8888's picks?"
+        elif any(word in user_lower for word in ["morgan stanley", "banking"]):
+            return "Let's work on your investment banking strategy."
         elif any(word in user_lower for word in ["hinge", "dating"]):
-            response = "How's the Hinge automation going? Any updates?"
+            return "How's the dating automation going?"
         else:
-            response = f"You said: {user_input}. What do you want to discuss?"
+            return f"You said: {user_text}. Tell me more."
     
     # Follow-up responses
-    elif "yes" in user_lower or "yeah" in user_lower:
-        response = "Great. What would you like to know?"
-    
-    elif "no" in user_lower or "nope" in user_lower:
-        response = "Understood. Anything else I can help with?"
-    
-    elif any(word in user_lower for word in ["thanks", "thank you", "thanks buddy"]):
-        response = "Anytime! Anything else?"
-    
-    elif any(word in user_lower for word in ["bye", "goodbye", "talk later", "see you"]):
-        response = "Catch you later, Henry. Talk soon!"
-    
+    elif "yes" in user_lower:
+        return "Great! What's your next question?"
+    elif "no" in user_lower:
+        return "Got it. Anything else?"
+    elif any(word in user_lower for word in ["thanks", "thank you"]):
+        return "Happy to help! Anything else?"
+    elif any(word in user_lower for word in ["bye", "goodbye", "later"]):
+        return "Catch you later, Henry!"
     else:
-        # Generic echo response
-        response = f"Interesting. Tell me more about that."
-    
-    # Store response
-    conversation_history[call_sid]["messages"].append({
-        "role": "assistant",
-        "text": response,
-        "time": datetime.now().isoformat()
-    })
-    
-    return response
+        return "Interesting. Tell me more about that."
 
 @app.route("/", methods=['GET'])
 def index():
@@ -103,11 +132,10 @@ def index():
         "status": "healthy",
         "app": "Clav Voice API",
         "phone": TWILIO_PHONE_NUMBER,
-        "ready": True,
-        "timestamp": datetime.now().isoformat()
+        "ready": True
     }
 
-@app.route("/voice/incoming", methods=['GET', 'POST'])
+@app.route("/voice/incoming", methods=['POST'])
 def incoming_call():
     """Handle incoming Twilio voice calls"""
     
@@ -117,15 +145,10 @@ def incoming_call():
     print(f"[{datetime.now()}] Incoming call from {from_number} (SID: {call_sid})")
     
     try:
-        # Import here to avoid issues on non-audio systems
         from twilio.twiml.voice_response import VoiceResponse
         
         response = VoiceResponse()
-        
-        # Greet the caller
         response.say("Hey Henry, I'm listening. Go ahead and speak.", voice='alice')
-        
-        # Record caller's voice
         response.record(
             max_speech_time=30,
             action="/voice/transcribe",
@@ -137,8 +160,7 @@ def incoming_call():
     
     except Exception as e:
         print(f"Error in incoming_call: {e}")
-        # Fallback XML response
-        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
         <Response>
             <Say voice="alice">Hey Henry, I am listening. Go ahead and speak.</Say>
             <Record maxSpeechTime="30" action="/voice/transcribe" method="POST" speechTimeout="auto"/>
@@ -151,19 +173,22 @@ def transcribe_and_respond():
     
     call_sid = request.values.get('CallSid', 'unknown')
     recording_url = request.values.get('RecordingUrl', '')
-    speech_result = request.values.get('SpeechResult', '')
     
-    print(f"[{datetime.now()}] Processing for call {call_sid}")
+    print(f"[{datetime.now()}] Transcribing for call {call_sid}")
+    print(f"Recording URL: {recording_url}")
     
     try:
         from twilio.twiml.voice_response import VoiceResponse
         
-        # Twilio provides speech_result if speech recognition is enabled
-        # Otherwise we'd need to download and transcribe, but that's complex on cloud
-        user_text = speech_result if speech_result else "I didn't catch that. Can you repeat?"
+        # Download and transcribe the audio
+        user_text = None
+        if recording_url:
+            user_text = download_and_transcribe_audio(recording_url)
         
-        if user_text and user_text != "I didn't catch that. Can you repeat?":
-            print(f"Transcribed: {user_text}")
+        if not user_text:
+            user_text = "I didn't catch that."
+        
+        print(f"Transcribed: {user_text}")
         
         # Generate response
         response_text = get_response(user_text, call_sid)
@@ -172,8 +197,6 @@ def transcribe_and_respond():
         # Create TwiML response
         response = VoiceResponse()
         response.say(response_text, voice='alice')
-        
-        # Ask for next input
         response.record(
             max_speech_time=30,
             action="/voice/transcribe",
@@ -185,21 +208,12 @@ def transcribe_and_respond():
     
     except Exception as e:
         print(f"Error in transcribe_and_respond: {e}")
-        # Fallback response
         xml = """<?xml version="1.0" encoding="UTF-8"?>
         <Response>
             <Say voice="alice">Sorry, there was a technical issue. Please try again.</Say>
             <Record maxSpeechTime="30" action="/voice/transcribe" method="POST" speechTimeout="auto"/>
         </Response>"""
         return Response(xml, mimetype='application/xml')
-
-@app.route("/health", methods=['GET'])
-def health():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat()
-    }, 200
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
