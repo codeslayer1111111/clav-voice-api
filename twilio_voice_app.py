@@ -1,175 +1,128 @@
 #!/usr/bin/env python3
 """
-Clav Voice API - Twilio Backend (SIMPLIFIED)
-Uses Twilio's built-in speech recognition (no Whisper needed)
+Clav Voice API - SIMPLIFIED VERSION
+Using Twilio Record + transcription callback
 """
 
 from flask import Flask, request, Response
 import os
-import json
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-# Twilio Credentials
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 
 app = Flask(__name__)
 
-# Simple conversation memory
-conversation_history = {}
+conversation = {}
 
-def get_response(user_text, call_sid):
-    """Generate response based on what the user said"""
+def get_response(text, call_sid):
+    """Simple response logic"""
+    if call_sid not in conversation:
+        conversation[call_sid] = 0
+    conversation[call_sid] += 1
     
-    if not user_text or user_text.strip() == "":
-        return "I didn't catch that. Can you speak up?"
+    text_lower = (text or "").lower()
     
-    # Initialize conversation
-    if call_sid not in conversation_history:
-        conversation_history[call_sid] = {"count": 0}
-    
-    conversation_history[call_sid]["count"] += 1
-    count = conversation_history[call_sid]["count"]
-    
-    user_lower = user_text.lower().strip()
-    
-    # Smart responses based on what they say
-    if count == 1:
-        # First message
-        if any(w in user_lower for w in ["hi", "hello", "hey", "test"]):
-            return "Hey Henry! The voice API is working! What's up?"
-        elif any(w in user_lower for w in ["contrarian", "track record", "backtest"]):
-            return "Want to dive into contrarian8888's track record?"
-        elif any(w in user_lower for w in ["morgan stanley", "banking", "investing"]):
-            return "Let's work on your investment strategy."
-        elif any(w in user_lower for w in ["hinge", "dating", "girls"]):
-            return "How's the dating app automation going?"
+    # Just echo back what they said
+    if conversation[call_sid] == 1:
+        if any(w in text_lower for w in ["hi", "hello", "hey", "test"]):
+            return "Hey Henry! Voice API is working. What do you want to talk about?"
+        elif "contrarian" in text_lower:
+            return "Want to analyze contrarian8888?"
+        elif "bye" in text_lower:
+            return "Talk later!"
         else:
-            return f"You said: {user_text}. What else?"
+            return f"You said {text}. Tell me more."
     else:
-        # Follow-up messages
-        if "yes" in user_lower:
-            return "Great! Tell me more."
-        elif "no" in user_lower:
-            return "Got it. What else can I help with?"
-        elif any(w in user_lower for w in ["thanks", "thank you"]):
-            return "Happy to help!"
-        elif any(w in user_lower for w in ["bye", "goodbye"]):
-            return "Catch you later!"
+        if "yes" in text_lower:
+            return "Great! What else?"
+        elif "no" in text_lower:
+            return "Got it. Next question?"
+        elif "bye" in text_lower:
+            return "Goodbye!"
         else:
-            return f"You said: {user_text}. Anything else?"
+            return "Anything else?"
 
 @app.route("/", methods=['GET'])
 def index():
-    """Health check"""
-    return {
-        "status": "online",
-        "app": "Clav Voice API",
-        "phone": TWILIO_PHONE_NUMBER
-    }
+    return {"status": "ok", "phone": TWILIO_PHONE_NUMBER}
 
 @app.route("/voice/incoming", methods=['POST'])
-def incoming_call():
-    """Handle incoming call - greet and ask for speech"""
-    
-    call_sid = request.values.get('CallSid', 'unknown')
-    from_number = request.values.get('From', 'unknown')
-    
-    print(f"[{datetime.now()}] Call from {from_number} (SID: {call_sid})")
-    
+def incoming():
+    """Initial greeting and record"""
     try:
         from twilio.twiml.voice_response import VoiceResponse
         
-        response = VoiceResponse()
+        resp = VoiceResponse()
+        resp.say("Hey Henry, voice API is live. Speak now.", voice='alice')
         
-        # Greet
-        response.say("Hey Henry! The voice API is live. Speak naturally and I'll respond.", voice='alice')
+        # Just use Record + transcription callback
+        resp.record(
+            max_speech_time=20,
+            transcribe=True,
+            transcribe_callback="/voice/transcribed",
+            action="/voice/next",  # Fallback if transcription fails
+            method="POST"
+        )
         
-        # Gather speech with Twilio's built-in recognition
-        # This is KEY: speechTimeout="auto" lets Twilio auto-detect end of speech
-        # numDigits="0" means don't listen for DTMF tones, just speech
-        with response.gather(
-            num_digits=0,  # Speech only, no tone listening
-            action="/voice/respond",  # Route to response endpoint
-            method="POST",
-            speech_timeout="auto",  # Auto-detect speech end
-            language="en-US",  # English US
-            max_speech_time=30  # Max 30 seconds
-        ) as gather:
-            gather.say("Go ahead.", voice='alice')
-        
-        return Response(str(response), mimetype='application/xml')
-    
+        return Response(str(resp), mimetype='application/xml')
     except Exception as e:
-        print(f"Error in incoming_call: {e}")
-        # Fallback
-        xml = """<?xml version="1.0" encoding="UTF-8"?>
-        <Response>
-            <Say voice="alice">Hey Henry! Speak naturally.</Say>
-            <Gather numDigits="0" action="/voice/respond" method="POST" speechTimeout="auto" language="en-US" maxSpeechTime="30">
-                <Say voice="alice">Go ahead.</Say>
-            </Gather>
-        </Response>"""
-        return Response(xml, mimetype='application/xml')
+        print(f"Error: {e}")
+        return Response('<?xml version="1.0"?><Response><Say>Error</Say></Response>', mimetype='application/xml')
 
-@app.route("/voice/respond", methods=['POST'])
-def respond_to_speech():
-    """Get the transcribed speech from Twilio and respond"""
-    
-    call_sid = request.values.get('CallSid', 'unknown')
-    
-    # THIS is key: Twilio provides SpeechResult after gathering speech
-    speech_result = request.values.get('SpeechResult', '').strip()
-    confidence = request.values.get('Confidence', '0')
-    
-    print(f"[{datetime.now()}] Speech from {call_sid}")
-    print(f"  Text: {speech_result}")
-    print(f"  Confidence: {confidence}")
-    
+@app.route("/voice/transcribed", methods=['POST'])
+def transcribed():
+    """Handle transcribed result from Twilio"""
+    try:
+        call_sid = request.values.get('CallSid', '')
+        transcript = request.values.get('TranscriptionText', '').strip()
+        
+        print(f"[{datetime.now()}] Transcribed from {call_sid}: {transcript}")
+        
+        from twilio.twiml.voice_response import VoiceResponse
+        
+        response_text = get_response(transcript, call_sid)
+        
+        resp = VoiceResponse()
+        resp.say(response_text, voice='alice')
+        resp.record(
+            max_speech_time=20,
+            transcribe=True,
+            transcribe_callback="/voice/transcribed",
+            action="/voice/next",
+            method="POST"
+        )
+        
+        return Response(str(resp), mimetype='application/xml')
+    except Exception as e:
+        print(f"Transcribed error: {e}")
+        return Response('<?xml version="1.0"?><Response><Say>Error processing</Say></Response>', mimetype='application/xml')
+
+@app.route("/voice/next", methods=['POST'])
+def next_recording():
+    """Fallback if transcription doesn't work"""
     try:
         from twilio.twiml.voice_response import VoiceResponse
         
-        # Get response to what they said
-        response_text = get_response(speech_result, call_sid)
+        resp = VoiceResponse()
+        resp.say("Speak again", voice='alice')
+        resp.record(
+            max_speech_time=20,
+            transcribe=True,
+            transcribe_callback="/voice/transcribed",
+            action="/voice/next",
+            method="POST"
+        )
         
-        print(f"  Response: {response_text}")
-        
-        # Create response with TwiML
-        response = VoiceResponse()
-        response.say(response_text, voice='alice')
-        
-        # Loop back - ask for next input
-        with response.gather(
-            num_digits=0,
-            action="/voice/respond",
-            method="POST",
-            speech_timeout="auto",
-            language="en-US",
-            max_speech_time=30
-        ) as gather:
-            gather.say("Go ahead.", voice='alice')
-        
-        return Response(str(response), mimetype='application/xml')
-    
+        return Response(str(resp), mimetype='application/xml')
     except Exception as e:
-        print(f"Error in respond_to_speech: {e}")
-        xml = """<?xml version="1.0" encoding="UTF-8"?>
-        <Response>
-            <Say voice="alice">Sorry, technical issue. Speak again.</Say>
-            <Gather numDigits="0" action="/voice/respond" method="POST" speechTimeout="auto" language="en-US" maxSpeechTime="30">
-                <Say voice="alice">Go ahead.</Say>
-            </Gather>
-        </Response>"""
-        return Response(xml, mimetype='application/xml')
+        print(f"Next error: {e}")
+        return Response('<?xml version="1.0"?><Response><Say>Error</Say></Response>', mimetype='application/xml')
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    print(f"Starting Clav Voice API on port {port}")
-    print(f"Twilio Phone: {TWILIO_PHONE_NUMBER}")
-    print(f"Using Twilio's built-in speech recognition")
     app.run(host='0.0.0.0', port=port, debug=False)
