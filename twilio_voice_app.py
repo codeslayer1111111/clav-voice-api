@@ -1,47 +1,63 @@
 #!/usr/bin/env python3
 """
-Clav Voice API - ULTRA SIMPLIFIED
-Single endpoint handling everything
+Clav Voice API - WITH CLAUDE AI
+Actually answers questions, not just generic responses
 """
 
 from flask import Flask, request, Response
 import os
 from datetime import datetime
 from dotenv import load_dotenv
+import anthropic
 
 load_dotenv()
 
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+
 app = Flask(__name__)
+client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 conversation = {}
 
-def get_response(text, call_sid):
-    """Generate response"""
+def get_smart_response(text, call_sid):
+    """Use Claude to generate intelligent responses"""
+    
     if call_sid not in conversation:
-        conversation[call_sid] = 0
-    conversation[call_sid] += 1
+        conversation[call_sid] = []
     
-    text_lower = (text or "").lower().strip()
+    # Add user message to conversation history
+    conversation[call_sid].append({
+        "role": "user",
+        "content": text
+    })
     
-    print(f"[{datetime.now()}] Response gen: call={call_sid}, msg={conversation[call_sid]}, text='{text}'")
+    try:
+        # Call Claude with conversation history
+        response = client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=150,
+            system="You are Henry's personal AI assistant named Clav. You're sharp, efficient, and helpful. Keep responses brief and natural for phone calls (1-2 sentences max). Answer questions directly and conversationally.",
+            messages=conversation[call_sid]
+        )
+        
+        assistant_message = response.content[0].text
+        
+        # Add assistant response to history
+        conversation[call_sid].append({
+            "role": "assistant",
+            "content": assistant_message
+        })
+        
+        # Keep conversation history limited to last 10 messages
+        if len(conversation[call_sid]) > 20:
+            conversation[call_sid] = conversation[call_sid][-20:]
+        
+        return assistant_message
     
-    if conversation[call_sid] == 1:
-        if any(w in text_lower for w in ["hi", "hello", "hey", "test", "hey"]):
-            return "Hey Henry! The API is working live. What do you want to talk about?"
-        elif "contrarian" in text_lower:
-            return "Want to analyze contrarian 8888's track record?"
-        elif "investing" in text_lower or "stocks" in text_lower:
-            return "Let's talk about investing strategy."
-        else:
-            return f"You said: {text}. Tell me more."
-    else:
-        if "yes" in text_lower:
-            return "Great! What's your next question?"
-        elif "no" in text_lower:
-            return "Understood. Anything else?"
-        else:
-            return "Got it. What else would you like to discuss?"
+    except Exception as e:
+        print(f"Claude error: {e}")
+        return "Sorry, I had a technical issue. Can you repeat that?"
 
 @app.route("/", methods=['GET'])
 def health():
@@ -56,9 +72,9 @@ def incoming():
     try:
         from twilio.twiml.voice_response import VoiceResponse
         resp = VoiceResponse()
-        resp.say("Hey Henry, the voice API is live. Speak now.", voice='alice')
+        resp.say("Hey Henry, I'm Clav. Your personal voice assistant is live. Go ahead and ask me anything.", voice='alice')
         
-        # Record with transcription and callback to same endpoint
+        # Record with transcription
         resp.record(
             max_speech_time=20,
             action="/voice/process",
@@ -76,37 +92,25 @@ def process_speech():
     """Handle recorded audio + transcription"""
     call_sid = request.values.get('CallSid', 'unknown')
     
-    # Try to get transcription
+    # Get transcription
     transcript = request.values.get('TranscriptionText', '').strip()
-    has_transcription = request.values.get('TranscriptionStatus', '').lower() == 'completed'
-    recording_url = request.values.get('RecordingUrl', '')
     
     print(f"[{datetime.now()}] PROCESS: call={call_sid}")
-    print(f"  TranscriptionStatus: {request.values.get('TranscriptionStatus', 'none')}")
-    print(f"  TranscriptionText: '{transcript}'")
-    print(f"  RecordingUrl: {recording_url}")
-    print(f"  All params: {dict(request.values)}")
+    print(f"  User said: '{transcript}'")
     
     try:
         from twilio.twiml.voice_response import VoiceResponse
         
-        # Determine what user said
-        user_text = ""
-        if transcript:
-            user_text = transcript
-            print(f"  Using transcription: {user_text}")
+        if not transcript or transcript == "":
+            response_text = "I didn't catch that. Can you speak up?"
         else:
-            user_text = "I didn't catch that clearly"
-            print(f"  No transcription, using fallback")
-        
-        # Get response
-        response_text = get_response(user_text, call_sid)
-        print(f"  Response: {response_text}")
+            # Use Claude to generate smart response
+            response_text = get_smart_response(transcript, call_sid)
+            print(f"  Clav response: {response_text}")
         
         # Send response and loop
         resp = VoiceResponse()
         resp.say(response_text, voice='alice')
-        resp.say("Speak again.", voice='alice')
         resp.record(
             max_speech_time=20,
             action="/voice/process",
@@ -119,7 +123,7 @@ def process_speech():
         print(f"Error in process: {e}")
         import traceback
         traceback.print_exc()
-        return Response('<?xml version="1.0"?><Response><Say>Error</Say></Response>', mimetype='application/xml')
+        return Response('<?xml version="1.0"?><Response><Say>Error processing</Say></Response>', mimetype='application/xml')
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
